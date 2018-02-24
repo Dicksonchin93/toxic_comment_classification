@@ -1,0 +1,8 @@
+fastText
+keras
+tensorflow-gpu
+pyenchant
+splitter
+gensim
+nltk
+
