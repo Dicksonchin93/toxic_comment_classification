@@ -1259,7 +1259,7 @@ class ToxModel():
 
         total_loss = 0
         for j in range(6):
-            loss = compute_auc(val_y[:, j], y_pred[:, j])
+            loss = log_loss(val_y[:, j], y_pred[:, j])
             total_loss += loss
 
         total_loss /= 6.
@@ -1268,7 +1268,7 @@ class ToxModel():
         
 
         current_epoch += 1
-        if total_loss > best_loss or best_loss == -1:
+        if total_loss < best_loss or best_loss == -1:
             best_loss = total_loss
             best_weights = model.get_weights()
             best_epoch = current_epoch
