@@ -1,4 +1,3 @@
-fastText
 keras
 tensorflow-gpu
 splitter
