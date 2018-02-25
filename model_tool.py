@@ -15,6 +15,8 @@ from keras.layers import Dropout
 from keras.layers import Bidirectional
 from keras.layers import LSTM
 from keras.layers import concatenate
+from keras.layers import GlobalAveragePooling1D, GlobalMaxPooling1D
+
 from keras.layers import Embedding
 from keras.layers import Embedding
 from keras import regularizers
@@ -23,10 +25,13 @@ from keras.layers import GlobalMaxPooling1D
 from keras.layers import Input
 from keras.layers import MaxPooling1D
 from keras.layers import CuDNNGRU
+from keras.layers import GRU
 from keras.models import load_model
+import fastText
 from keras.models import Model
 from keras.optimizers import RMSprop
 from keras.optimizers import Adam
+from keras.optimizers import Nadam
 from keras.preprocessing.sequence import pad_sequences
 from keras.preprocessing.text import Tokenizer
 from keras.utils import to_categorical
@@ -45,15 +50,15 @@ from sklearn import metrics
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.cross_validation import train_test_split
 from gensim.models.keyedvectors import KeyedVectors
-import enchant
-import splitter
+#import enchant
+#import splitter
 import h5py
 from sklearn.metrics import log_loss
 from sklearn.metrics import auc
 import string
 import re
 from nltk.corpus import stopwords
-from fastText import load_model
+#from fastText import load_model
 
 
 class Attention(Layer):
@@ -135,17 +140,17 @@ DEFAULT_EMBEDDINGS_PATH = 'wiki.en.vec'
 DEFAULT_MODEL_DIR = 'models'
 
 DEFAULT_HPARAMS = {
-    'max_sequence_length': 250,
-    'max_num_words': 199814,
+    'max_sequence_length': 150,
+    'max_num_words': 195121,
     'embedding_dim': 300,
     'embedding_trainable': False,
-    'learning_rate': 0.0007,
+    'learning_rate': 0.001,
     'stop_early': False,
     'es_patience': 1,  # Only relevant if STOP_EARLY = True
     'es_min_delta': 0,  # Only relevant if STOP_EARLY = True
-    'batch_size': 256,
+    'batch_size': 128,
     'epochs': 1,
-    'dropout_rate': 0.3,
+    'dropout_rate': 0.5,
     'cnn_filter_sizes': [128, 128, 128],
     'cnn_kernel_sizes': [5, 5, 5],
     'cnn_pooling_sizes': [5, 5, 40],
@@ -395,7 +400,7 @@ class ToxModel():
     #special symbols
     df[comment] = df[comment].apply(lambda x : " ".join(re.findall('[\w]+',x)))
     #stop words
-    df[comment] = df[comment].apply(lambda x: remove_stopWords(x, stopwords_en))
+    df[comment] = df[comment].apply(lambda x: self.remove_stopwords(x, stopwords_en))
     #websites
     df[comment] = df[comment].replace(r'http\S+', '', regex=True).replace(r'www\S+', '', regex=True)
     df[comment] = df[comment].replace(r'@[^\s]+[\s]?', '', regex=True)
@@ -420,7 +425,7 @@ class ToxModel():
     return df
 
     
-  def remove_stopWords(self, s, stop_words):
+  def remove_stopwords(self, s, stop_words):
     '''For removing stop words
     '''
     s = ' '.join(word for word in s.split() if word not in stop_words)
@@ -604,6 +609,35 @@ class ToxModel():
         num_words_in_embedding += 1
         # words not found in embedding index will be all-zeros.
         self.embedding_matrix[i] = embedding_vector
+  
+  def load_embeddings_fast_bin(self):
+    """Loads word embeddings."""
+    #word_vectors = KeyedVectors.load_word2vec_format('crawl-300d-2M.vec', binary=False)
+    '''
+    embeddings_index = {}
+    with open(self.embeddings_path) as f:
+      for line in f:
+        values = line.split()
+        word = values[0]
+        coefs = np.asarray(values[1:], dtype='float32')
+        embeddings_index[word] = coefs
+    '''
+    ft_model = fastText.load_model('wiki.en.bin')
+    n_features = ft_model.get_dimension()
+    
+    self.embedding_matrix = np.zeros((len(self.tokenizer.word_index) + 1,
+                                      self.hparams['embedding_dim']))
+    num_words_in_embedding = 0
+    num_words_replaced = 0
+    num_words_fail_replaced = 0
+    for word, i in self.tokenizer.word_index.items():
+      if (i >= (len(self.tokenizer.word_index) + 1)):
+        continue
+      embedding_vector = ft_model.get_word_vector(word).astype('float32')
+      if embedding_vector is not None:
+        num_words_in_embedding += 1
+        # words not found in embedding index will be all-zeros.
+        self.embedding_matrix[i] = embedding_vector
       
         
   def load_model_FT(self):
@@ -649,11 +683,7 @@ class ToxModel():
     train_data = pd.read_csv(training_data_path)
     train_data['comment_text'] = train_data['comment_text'].fillna('_empty_')
    # valid_data = pd.read_csv(validation_data_path)
-    train_data = self.Sanitize(train_data)
-    train_data.to_csv('cleaned_final_train_clean.csv', index=False)
-    random_test = pd.read_csv('test.csv')
-    random_test = self.Sanitize(random_test)
-    random_test.to_csv('cleaned_test_clean.csv', index=False)
+   
     print('Fitting tokenizer...')
     self.fit_and_save_tokenizer(train_data[text_column])
     print('Tokenizer fitted!')
@@ -708,7 +738,8 @@ class ToxModel():
     print('Loading embeddings...')
     if (cl != 2):
         self.load_embeddings()
-    self.load_embeddings_fast()
+    #self.load_embeddings_fast()
+    self.load_embeddings_fast_bin()
     print('Embeddings loaded!')
 
     print('Building model graph...')
@@ -758,9 +789,9 @@ class ToxModel():
         
         print('Model trained!')
         print("Predicting results...")
-        random_test = pd.read_csv('cleaned_test.csv')
+        random_test = pd.read_csv('cleaned_test_clean.csv')
         #random_test = self.Sanitize(random_test)
-        random_test.to_csv('cleaned_test.csv', index=False)
+        #random_test.to_csv('cleaned_test_clean.csv', index=False)
         X_test = random_test['comment_text'].fillna('_empty_')
         X_test = self.prep_text(X_test)
         #X_test = self.load_data(X_test)
@@ -785,13 +816,13 @@ class ToxModel():
         test_predicts = pd.DataFrame(data=test_predicts, columns=CLASSES)
         test_predicts["id"] = test_ids
         test_predicts = test_predicts[["id"] + CLASSES]
-        test_predicts.to_csv('augmentori_pred_fasttext_gru_cv_output_two.csv', index=False)
+        test_predicts.to_csv('augmentori_pred_fasttext_gru_cv_concat.csv', index=False)
         print('predicted !')
         label_cols = ['toxic', 'severe_toxic', 'obscene', 'threat', 'insult', 'identity_hate']
-        subm = pd.read_csv('sample_submission.csv')
+        subm = pd.read_csv('cleaned_final_train_clean.csv')
         submid = pd.DataFrame({'id': subm["id"]})
         total_meta_data = pd.concat([submid, pd.DataFrame(total_meta, columns = label_cols)], axis=1)
-        total_meta_data.to_csv('augmentori_meta_grulstmCV_fasttextpretrain_two.csv', index=False)
+        total_meta_data.to_csv('augmentori_pred_fasttext_gru_cv_concat_pretrain_meta.csv', index=False)
         print('Meta predicted !')
     else:
 
@@ -1040,19 +1071,20 @@ class ToxModel():
     embedded_sequences = embedding_layer(sequence_input)
     x = embedded_sequences
     
-    x = self.get_gru(x, l2_weight_decay)
+    x = self.get_gru_pool(x, l2_weight_decay)
 
   
     preds = Dense(6, activation='sigmoid', input_shape=(6,))(x)
 
     #rmsprop = RMSprop(lr=self.hparams['learning_rate'])
-    adam = Adam(lr=self.hparams['learning_rate'])
+    #adam = Adam(lr=self.hparams['learning_rate'])
+    nadam = Nadam(lr=self.hparams['learning_rate'])
     #self.model = Model(sequence_input, preds)
     #self.model.compile(
     #    loss='binary_crossentropy', optimizer=adam, metrics=['acc'])
     model = Model(sequence_input, preds)
     model.compile(
-        loss='binary_crossentropy', optimizer=adam, metrics=['acc'])
+        loss='binary_crossentropy', optimizer=nadam, metrics=['acc'])
     return model
   
   def get_cnn(self, input_tensor, l2_weight_decay):
@@ -1109,7 +1141,43 @@ class ToxModel():
     #output = Dense(6, activation='sigmoid')(output)
     
     return output
+  def get_gru_pool(self, input_tensor, l2_weight_decay, recurrent_units=128):
+    x = Bidirectional(CuDNNGRU(recurrent_units, return_sequences=True))(input_tensor)
+    att = Attention(self.hparams['max_sequence_length'])(x)
+    att = Dropout(0.5)(att)
+    avg_pool = GlobalAveragePooling1D()(x)
+    avg_pool = Dropout(0.5)(avg_pool)
+    max_pool = GlobalMaxPooling1D()(x)
+    max_pool = Dropout(0.5)(max_pool)
+    conc = concatenate([avg_pool, max_pool, att])
+    output = Dropout(0.5)(conc)
+    output = BatchNormalization()(output)
+    #output = Bidirectional(CuDNNGRU(recurrent_units, return_sequences=False))(input_tensor)
+    #output = Attention(self.hparams['max_sequence_length'])(output)
+    #output = Dense(128, activation='relu')(output)
+    #output = GlobalMaxPooling1D()(output)
+    #output = Dropout(self.hparams['dropout_rate'])(output)
+    #output = Dense(256, activation='linear')(output)
+    #output = LeakyReLU(alpha=.001)(output)
+    #output = Dropout(self.hparams['dropout_rate'])(output)
+    #output = Dense(128, activation='linear')(output)
+    #output = LeakyReLU(alpha=.001)(output)
+    #output = Dropout(self.hparams['dropout_rate'])(output)
+    #output = Dense(64, activation='linear')(output)
+    #output = LeakyReLU(alpha=.001)(output)
+    #output = Dropout(self.hparams['dropout_rate'])(output)
+    #output = Dense(32, activation='relu')(output)
+    #output = LeakyReLU(alpha=.001)(output)
+    #output = Bidirectional(CuDNNGRU(recurrent_units, return_sequences=False))(output)
+    #output = Dropout(self.hparams['dropout_rate'])(output)
+    #output = Dense(32, activation='relu', kernel_regularizer=regularizers.l2(l2_weight_decay))(output)
+    #output = Dropout(self.hparams['dropout_rate'])(output)
+    #output = BatchNormalization()(output)
     
+    #output = Dense(6, activation='sigmoid')(output)
+    
+    return output
+   
   def get_gru_lstm(self, input_tensor, l2_weight_decay, recurrent_units=64, lstm_dim=50):
     output = Bidirectional(CuDNNGRU(recurrent_units, return_sequences=True))(input_tensor)
     #output = Attention(self.hparams['max_sequence_length'])(output)
