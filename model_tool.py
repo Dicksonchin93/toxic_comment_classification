@@ -6,7 +6,9 @@ from __future__ import print_function
 import cPickle
 import json
 import os
+from collections import defaultdict
 import numpy as np
+import io
 from keras.callbacks import EarlyStopping
 from keras.callbacks import ModelCheckpoint
 from keras.layers import Conv1D
@@ -15,10 +17,13 @@ from keras.layers import Dropout
 from keras.layers import Bidirectional
 from keras.layers import LSTM
 from keras.layers import concatenate
-from keras.layers import GlobalAveragePooling1D, GlobalMaxPooling1D
+from keras.layers import Add
+from keras.layers import TimeDistributed
+from keras.layers import GlobalAveragePooling1D, GlobalMaxPooling1D, Activation
 
 from keras.layers import Embedding
 from keras.layers import Embedding
+from keras.layers import SpatialDropout1D
 from keras import regularizers
 from keras.layers import Flatten
 from keras.layers import GlobalMaxPooling1D
@@ -37,6 +42,7 @@ from keras.preprocessing.text import Tokenizer
 from keras.utils import to_categorical
 from keras import backend as K
 from keras.engine.topology import Layer
+from keras import initializers
 from keras import initializers, regularizers, constraints
 from keras.layers.normalization import BatchNormalization
 from keras.layers.advanced_activations import LeakyReLU, PReLU
@@ -131,29 +137,53 @@ class Attention(Layer):
         return input_shape[0],  self.features_dim
         
 
+class AttLayer(Layer):
+    def __init__(self, **kwargs):
+        self.init = initializers.get('normal')
+        #self.input_spec = [InputSpec(ndim=3)]
+        super(AttLayer, self).__init__(**kwargs)
 
+    def build(self, input_shape):
+        assert len(input_shape)==3
+        #self.W = self.init((input_shape[-1],1))
+        self.W = self.init((input_shape[-1],))
+        #self.input_spec = [InputSpec(shape=input_shape)]
+        self.trainable_weights = [self.W]
+        super(AttLayer, self).build(input_shape)  # be sure you call this somewhere!
+
+    def call(self, x, mask=None):
+        eij = K.tanh(K.dot(x, self.W))
+        
+        ai = K.exp(eij)
+        weights = ai/K.sum(ai, axis=1).dimshuffle(0,'x')
+        
+        weighted_input = x*weights.dimshuffle(0,1,'x')
+        return weighted_input.sum(axis=1)
+
+    def get_output_shape_for(self, input_shape):
+        return (input_shape[0], input_shape[-1])
 print('HELLO from model_tool')
-
+DEFAULT_EMBEDDINGS_PATH = 'glove.twitter.27B.200d.txt'
 #DEFAULT_EMBEDDINGS_PATH = 'data/glove.6B/glove.840B.300d.txt'
 #DEFAULT_EMBEDDINGS_PATH = 'crawl-300d-2M.vec'
-DEFAULT_EMBEDDINGS_PATH = 'wiki.en.vec'
+#DEFAULT_EMBEDDINGS_PATH = 'wiki.en.vec'
 DEFAULT_MODEL_DIR = 'models'
 
 DEFAULT_HPARAMS = {
-    'max_sequence_length': 150,
-    'max_num_words': 195121,
-    'embedding_dim': 300,
+    'max_sequence_length': 200,
+    'max_num_words': 100000,
+    'embedding_dim': 200,
     'embedding_trainable': False,
-    'learning_rate': 0.001,
+    'learning_rate': 0.0001,
     'stop_early': False,
     'es_patience': 1,  # Only relevant if STOP_EARLY = True
     'es_min_delta': 0,  # Only relevant if STOP_EARLY = True
     'batch_size': 128,
     'epochs': 1,
     'dropout_rate': 0.5,
-    'cnn_filter_sizes': [128, 128, 128],
+    'cnn_filter_sizes': [512, 512, 512],
     'cnn_kernel_sizes': [5, 5, 5],
-    'cnn_pooling_sizes': [5, 5, 40],
+    'cnn_pooling_sizes': [5, 5, 5],
     'verbose': True
 }
 
@@ -247,14 +277,14 @@ class ToxModel():
       json.dump(self.hparams, f, sort_keys=True)
 
   def load_model_from_name(self, model_name):
-    self.model = load_model(
-        os.path.join(self.model_dir, '%s_model.h5' % model_name))
+    #self.model = load_model(
+    #    os.path.join(self.model_dir, '%s_model.h5' % model_name))
     self.tokenizer = cPickle.load(
         open(
             os.path.join(self.model_dir, '%s_tokenizer.pkl' % model_name),
             'rb'))
     with open(
-        os.path.join(self.model_dir, '%s_hparams.json' % self.model_name),
+        os.path.join(self.model_dir, '%s_hparams.json' % model_name),
         'r') as f:
       self.hparams = json.load(f)
   
@@ -280,6 +310,37 @@ class ToxModel():
                      os.path.join(self.model_dir,
                                   '%s_tokenizer.pkl' % self.model_name ), 'wb'))
 
+  def prep_text_nltk(self, texts,text_column):
+    """Turns text into into padded sequences.
+
+    The tokenizer must be initialized before calling this method.
+
+    Args:
+      texts: Sequence of text strings.
+
+    Returns:
+      A tokenized and padded text sequence as a model input.
+    """
+    text_sequences = texts.apply(lambda row: nltk.word_tokenize(row[text_column]), axis=1)
+    #text_sequences = nltk.word_tokenize(texts)
+    #text_sequences = self.tokenizer.texts_to_sequences(texts)
+    number_replaced = 0
+    for id,sequence in enumerate(text_sequences):
+        for jd, word in enumerate(sequence):
+            if(word=="n't"):
+                text_sequences[id][jd] = "not"
+                number_replaced += 1
+            elif(word=="'ve"):
+                text_sequences[id][jd] = "have"
+                number_replaced += 1
+            elif(word=="'m"):
+                text_sequences[id][jd] = "am"
+                number_replaced += 1
+    print("number of words replaced {}".format(number_replaced))
+    #unique_word_count = set(text_sequences)
+    return pad_sequences(
+        text_sequences, maxlen=self.hparams['max_sequence_length'])
+
   def prep_text(self, texts):
     """Turns text into into padded sequences.
 
@@ -296,6 +357,12 @@ class ToxModel():
         text_sequences, maxlen=self.hparams['max_sequence_length'])
         
   def Sanitize(self, df):
+    emoji_dict = defaultdict()
+    with io.open('emoji_unicode_names_final.txt', 'r', encoding="utf8") as f:
+        lines = f.readlines()
+        for line in lines:
+            tokens = line.strip().split('\t')
+            emoji_dict[tokens[0]] = tokens[1]
     repl = {
     "&lt;3": " good ",
     ":d": " good ",
@@ -390,6 +457,8 @@ class ToxModel():
             if j in keys:
                 # print("inn")
                 j = repl[j]
+            if j in emoji_dict:
+                j = emoji_dict[j]
             xx += j + " "
         new_train_data.append(xx)
     df["comment_text"] = new_train_data
@@ -493,13 +562,15 @@ class ToxModel():
         coefs = np.asarray(values[1:], dtype='float32')
         embeddings_index[word] = coefs
 
-    self.embedding_matrix = np.zeros((len(self.tokenizer.word_index) + 1,
+    #self.embedding_matrix = np.zeros((len(self.tokenizer.word_index) + 1,
+    #                                  self.hparams['embedding_dim']))
+    self.embedding_matrix = np.zeros((self.hparams['max_num_words'],
                                       self.hparams['embedding_dim']))
     num_words_in_embedding = 0
     num_words_replaced = 0
     num_words_fail_replaced = 0
     for word, i in self.tokenizer.word_index.items():
-      if (i >= (len(self.tokenizer.word_index) + 1)):
+      if (i >= (self.hparams['max_num_words'])):
         continue
       embedding_vector = embeddings_index.get(word)
       if embedding_vector is not None:
@@ -596,13 +667,16 @@ class ToxModel():
         coefs = np.asarray(values[1:], dtype='float32')
         embeddings_index[word] = coefs
 
-    self.embedding_matrix = np.zeros((len(self.tokenizer.word_index) + 1,
+    #self.embedding_matrix = np.zeros((len(self.tokenizer.word_index) + 1,
+    #                                  self.hparams['embedding_dim']))
+    
+    self.embedding_matrix = np.zeros((self.hparams['max_num_words'],
                                       self.hparams['embedding_dim']))
     num_words_in_embedding = 0
     num_words_replaced = 0
     num_words_fail_replaced = 0
     for word, i in self.tokenizer.word_index.items():
-      if (i >= (len(self.tokenizer.word_index) + 1)):
+      if (i >= (self.hparams['max_num_words'])):
         continue
       embedding_vector = embeddings_index.get(word)
       if embedding_vector is not None:
@@ -625,13 +699,42 @@ class ToxModel():
     ft_model = fastText.load_model('wiki.en.bin')
     n_features = ft_model.get_dimension()
     
-    self.embedding_matrix = np.zeros((len(self.tokenizer.word_index) + 1,
+    self.embedding_matrix = np.zeros((self.hparams['max_num_words'],
                                       self.hparams['embedding_dim']))
     num_words_in_embedding = 0
     num_words_replaced = 0
     num_words_fail_replaced = 0
     for word, i in self.tokenizer.word_index.items():
-      if (i >= (len(self.tokenizer.word_index) + 1)):
+      if (i >= (self.hparams['max_num_words'])):
+        continue
+      embedding_vector = ft_model.get_word_vector(word).astype('float32')
+      if embedding_vector is not None:
+        num_words_in_embedding += 1
+        # words not found in embedding index will be all-zeros.
+        self.embedding_matrix[i] = embedding_vector
+  
+  def load_embeddings_fast_bin_nltk(self, unique_words):
+    """Loads word embeddings."""
+    #word_vectors = KeyedVectors.load_word2vec_format('crawl-300d-2M.vec', binary=False)
+    '''
+    embeddings_index = {}
+    with open(self.embeddings_path) as f:
+      for line in f:
+        values = line.split()
+        word = values[0]
+        coefs = np.asarray(values[1:], dtype='float32')
+        embeddings_index[word] = coefs
+    '''
+    ft_model = fastText.load_model('wiki.en.bin')
+    n_features = ft_model.get_dimension()
+    
+    self.embedding_matrix = np.zeros((len(unique_words) + 1,
+                                      self.hparams['embedding_dim']))
+    num_words_in_embedding = 0
+    num_words_replaced = 0
+    num_words_fail_replaced = 0
+    for word, i in enumerate(unique_words):
+      if (i >= (len(unique_words) + 1)):
         continue
       embedding_vector = ft_model.get_word_vector(word).astype('float32')
       if embedding_vector is not None:
@@ -673,6 +776,42 @@ class ToxModel():
 
     return x
 
+  def predict_test(self, cl, training_data_path, text_column,
+            toxic, severe_toxic, obscene, threat, insult, identity_hate , model_name, model_list,pretrain = False):
+    self.load_model_from_name(model_name)
+    print("loading embeddings")
+    self.load_embeddings_fast_bin()
+    print("embeddings loaded")
+    random_test = pd.read_csv('cleaned_test_clean.csv')
+    X_test = random_test['comment_text'].fillna('_empty_')
+    X_test = self.prep_text(X_test)
+    folds = 10
+    list_predicts = []
+    list_models = []
+    for fold in range(0, folds):
+        model = self.build_model_eight()
+        model_path = os.path.join(self.model_dir, "model{0}_weights.npy".format(fold))
+        weights = np.load(model_path)
+        model.set_weights(weights)
+        test_predict = model.predict(X_test, batch_size=self.hparams['batch_size'])
+        list_predicts.append(test_predict)
+        list_models.append(model)
+    test_predicts = np.ones(list_predicts[0].shape)
+    for fold_predict in list_predicts:
+        test_predicts *= fold_predict
+
+    test_predicts **= (1. / len(list_predicts))
+    test_ids = random_test["id"].values
+    test_ids = test_ids.reshape((len(test_ids), 1))
+    CLASSES = ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate"]
+    test_predicts = pd.DataFrame(data=test_predicts, columns=CLASSES)
+    test_predicts["id"] = test_ids
+    test_predicts = test_predicts[["id"] + CLASSES]
+    test_predicts.to_csv('retry_test_predictions.csv', index=False)
+    
+    
+    
+    
   def train(self, cl, training_data_path, text_column,
             toxic, severe_toxic, obscene, threat, insult, identity_hate , model_name, model_list,pretrain = False):
     """Trains the model."""
@@ -681,11 +820,19 @@ class ToxModel():
     self.save_hparams(model_name)
 
     train_data = pd.read_csv(training_data_path)
+    #train_data = self.Sanitize(train_data)
+    #train_data.to_csv('clean_train_ori_sec.csv', index=False)
     train_data['comment_text'] = train_data['comment_text'].fillna('_empty_')
    # valid_data = pd.read_csv(validation_data_path)
-   
+    df_test = pd.read_csv('clean_test_sec.csv')
+    #df_test = self.Sanitize(df_test)
+    #df_test.to_csv('clean_test_sec.csv', index=False)
+    df_test = df_test['comment_text'].fillna('_empty_')
     print('Fitting tokenizer...')
-    self.fit_and_save_tokenizer(train_data[text_column])
+    df_combined =  pd.concat(objs=[train_data, df_test], axis=0).reset_index(drop=True)
+    df_combined['comment_text'] = df_combined['comment_text'].fillna('_empty_')
+    #self.fit_and_save_tokenizer(train_data[text_column])
+    self.fit_and_save_tokenizer(df_combined[text_column])
     print('Tokenizer fitted!')
 
     print('Preparing data...')
@@ -703,6 +850,9 @@ class ToxModel():
     #                            to_categorical(train_data[toxic]))
     train_text_temp, train_labels_temp = (self.prep_text(train_data[text_column]),
                                 tl)
+    #train_text_temp, train_labels_temp = (self.prep_text_nltk(train_data, text_column),
+    #                            tl)
+    
     #CHAR-level                           
     #train_text_temp, train_labels_temp = (self.load_data(train_data[text_column]),
     #                            tl)
@@ -738,8 +888,9 @@ class ToxModel():
     print('Loading embeddings...')
     if (cl != 2):
         self.load_embeddings()
-    #self.load_embeddings_fast()
-    self.load_embeddings_fast_bin()
+    self.load_embeddings_fast()
+    #self.load_embeddings_fast_bin()
+    #self.load_embeddings_fast_bin_nltk(unique_words)
     print('Embeddings loaded!')
 
     print('Building model graph...')
@@ -789,7 +940,7 @@ class ToxModel():
         
         print('Model trained!')
         print("Predicting results...")
-        random_test = pd.read_csv('cleaned_test_clean.csv')
+        random_test = pd.read_csv('clean_test_sec.csv')
         #random_test = self.Sanitize(random_test)
         #random_test.to_csv('cleaned_test_clean.csv', index=False)
         X_test = random_test['comment_text'].fillna('_empty_')
@@ -816,13 +967,13 @@ class ToxModel():
         test_predicts = pd.DataFrame(data=test_predicts, columns=CLASSES)
         test_predicts["id"] = test_ids
         test_predicts = test_predicts[["id"] + CLASSES]
-        test_predicts.to_csv('augmentori_pred_fasttext_gru_cv_concat.csv', index=False)
+        test_predicts.to_csv('ori_pred_han.csv', index=False)
         print('predicted !')
         label_cols = ['toxic', 'severe_toxic', 'obscene', 'threat', 'insult', 'identity_hate']
-        subm = pd.read_csv('cleaned_final_train_clean.csv')
+        subm = pd.read_csv('train.csv')
         submid = pd.DataFrame({'id': subm["id"]})
         total_meta_data = pd.concat([submid, pd.DataFrame(total_meta, columns = label_cols)], axis=1)
-        total_meta_data.to_csv('augmentori_pred_fasttext_gru_cv_concat_pretrain_meta.csv', index=False)
+        total_meta_data.to_csv('ori_concat_han_meta.csv', index=False)
         print('Meta predicted !')
     else:
 
@@ -986,7 +1137,7 @@ class ToxModel():
     sequence_input = Input(
         shape=(self.hparams['max_sequence_length'],), dtype='int32')
     embedding_layer = Embedding(
-        len(self.tokenizer.word_index) + 1,
+        len(self.f.word_index) + 1,
         self.hparams['embedding_dim'],
         weights=[self.embedding_matrix],
         input_length=self.hparams['max_sequence_length'],
@@ -1006,6 +1157,7 @@ class ToxModel():
     #self.model.compile(
     #    loss='binary_crossentropy', optimizer=adam, metrics=['acc'])
     model = Model(sequence_input, preds)
+    
     model.compile(
         loss='binary_crossentropy', optimizer=adam, metrics=['acc'])
     return model
@@ -1071,33 +1223,72 @@ class ToxModel():
     embedded_sequences = embedding_layer(sequence_input)
     x = embedded_sequences
     
-    x = self.get_gru_pool(x, l2_weight_decay)
+    #x = self.get_gru_pool(x, l2_weight_decay)
+    #x = self.get_cnn(x, l2_weight_decay)'
+    x = self.get_han_gru(x, l2_weight_decay, sequence_input)
+    
 
   
     preds = Dense(6, activation='sigmoid', input_shape=(6,))(x)
 
     #rmsprop = RMSprop(lr=self.hparams['learning_rate'])
-    #adam = Adam(lr=self.hparams['learning_rate'])
-    nadam = Nadam(lr=self.hparams['learning_rate'])
+    decay_rate = self.hparams['learning_rate'] * (0.7**30)
+    adam = Adam(lr=self.hparams['learning_rate'], decay=decay_rate)
+    #nadam = Nadam(lr=self.hparams['learning_rate'])
     #self.model = Model(sequence_input, preds)
     #self.model.compile(
     #    loss='binary_crossentropy', optimizer=adam, metrics=['acc'])
     model = Model(sequence_input, preds)
+    
     model.compile(
-        loss='binary_crossentropy', optimizer=nadam, metrics=['acc'])
+        loss='binary_crossentropy', optimizer=adam, metrics=['acc'])
     return model
   
   def get_cnn(self, input_tensor, l2_weight_decay):
+    #output = input_tensor
     for filter_size, kernel_size, pool_size in zip(
         self.hparams['cnn_filter_sizes'], self.hparams['cnn_kernel_sizes'],
         self.hparams['cnn_pooling_sizes']):
       output = self.build_conv_layer(input_tensor, filter_size, kernel_size, pool_size)
     output = Flatten()(output)
     output = Dropout(self.hparams['dropout_rate'])(output)
-    output = Dense(128, activation='relu',kernel_regularizer=regularizers.l2(l2_weight_decay))(output)
     output = Dense(6, activation='sigmoid')(output)
-    #output = Reshape(target_shape=(6,))(output)
     return output
+
+  def build_conv_layer(self, input_tensor, filter_size, kernel_size, pool_size):
+    # block_1
+
+    X_shortcut1 = input_tensor
+
+    X = Conv1D(filters=filter_size, kernel_size=kernel_size, strides=3)(input_tensor)
+    X = Activation('relu')(X)
+
+    X = Conv1D(filters=filter_size, kernel_size=kernel_size, strides=3)(X)
+    X = Activation('relu')(X)
+
+    # connect shortcut to the main path
+    X = Activation('relu')(X_shortcut1)  # pre activation
+    X = Add()([X_shortcut1,X])
+
+    X = MaxPooling1D(pool_size=pool_size, strides=2, padding='valid')(X)
+
+    # block_2
+
+    X_shortcut2 = X
+
+    X = Conv1D(filters=filter_size, kernel_size=kernel_size, strides=3)(X)
+    X = Activation('relu')(X)
+
+    X = Conv1D(filters=filter_size, kernel_size=kernel_size, strides=3)(X)
+    X = Activation('relu')(X)
+
+    #  connect shortcut to the main path
+    X = Activation('relu')(X_shortcut2)  # pre activation
+    X = Add()([X_shortcut2,X])
+
+    X = MaxPooling1D(pool_size=pool_size, strides=2, padding='valid')(X)
+
+    return X
   
   def get_lstm(self, input_tensor, l2_weight_decay, lstm_dim=50):
     output = Bidirectional(LSTM(lstm_dim, return_sequences=True))(input_tensor)
@@ -1116,10 +1307,12 @@ class ToxModel():
     return output
   
   def get_gru(self, input_tensor, l2_weight_decay, recurrent_units=512):
-    output = Bidirectional(CuDNNGRU(recurrent_units, return_sequences=False))(input_tensor)
+    x = SpatialDropout1D(0.2)(input_tensor)
+    output = Bidirectional(CuDNNGRU(recurrent_units, return_sequences=False))(x)
     #output = Attention(self.hparams['max_sequence_length'])(output)
     #output = Dense(128, activation='relu')(output)
     #output = GlobalMaxPooling1D()(output)
+  
     output = Dropout(self.hparams['dropout_rate'])(output)
     output = Dense(256, activation='linear')(output)
     output = LeakyReLU(alpha=.001)(output)
@@ -1141,17 +1334,57 @@ class ToxModel():
     #output = Dense(6, activation='sigmoid')(output)
     
     return output
-  def get_gru_pool(self, input_tensor, l2_weight_decay, recurrent_units=128):
-    x = Bidirectional(CuDNNGRU(recurrent_units, return_sequences=True))(input_tensor)
-    att = Attention(self.hparams['max_sequence_length'])(x)
-    att = Dropout(0.5)(att)
-    avg_pool = GlobalAveragePooling1D()(x)
-    avg_pool = Dropout(0.5)(avg_pool)
-    max_pool = GlobalMaxPooling1D()(x)
-    max_pool = Dropout(0.5)(max_pool)
-    conc = concatenate([avg_pool, max_pool, att])
-    output = Dropout(0.5)(conc)
+  def get_han_gru(self, input_tensor, l2_weight_decay,sequence_input, recurrent_units=90):
+    MAX_SENTS = 15
+
+    l_lstm = Bidirectional(GRU(100, return_sequences=True))(input_tensor)
+    l_dense = TimeDistributed(Dense(200))(l_lstm)
+    l_att = Attention(self.hparams['max_sequence_length'])(l_dense)
+    sentEncoder = Model(sequence_input, l_att)
+
+    review_encoder = TimeDistributed(sentEncoder)(sequence_input)
+    l_lstm_sent = Bidirectional(GRU(100, return_sequences=True))(review_encoder)
+    l_dense_sent = TimeDistributed(Dense(200))(l_lstm_sent)
+    l_att_sent = Attention(self.hparams['max_sequence_length'])(l_dense_sent)
+    
+    return l_att_sent, review_input
+    
+    
+  def get_han_lstm(self, input_tensor, l2_weight_decay,sequence_input, recurrent_units=90):
+    MAX_SENTS = 15
+
+    l_lstm = Bidirectional(LSTM(100))(embedded_sequences)
+    sentEncoder = Model(sentence_input, l_lstm)
+    review_input = Input(shape=(MAX_SENTS,self.hparams['max_sequence_length']), dtype='int32')
+    review_encoder = TimeDistributed(sentEncoder)(review_input)
+    l_lstm_sent = Bidirectional(LSTM(100))(review_encoder)
+    preds = Dense(2, activation='softmax')(l_lstm_sent)
+    model = Model(review_input, preds)
+    
+  def get_gru_pool(self, input_tensor, l2_weight_decay, recurrent_units=90):
+    sd = SpatialDropout1D(0.2)(input_tensor)
+    x = Bidirectional(CuDNNGRU(recurrent_units, return_sequences=True))(sd)
+    #att = Attention(self.hparams['max_sequence_length'])(x)
+    output = Dropout(0.5)(x)
     output = BatchNormalization()(output)
+    output = Bidirectional(CuDNNGRU(recurrent_units, return_sequences=True))(output)
+    #att = Attention(self.hparams['max_sequence_length'])(x)
+    #output = Dropout(0.5)(output)
+    #output = BatchNormalization()(output)
+    
+    
+    avg_pool = GlobalAveragePooling1D()(output)
+    avg_pool = Dropout(0.45)(avg_pool)
+    max_pool = GlobalMaxPooling1D()(output)
+    max_pool = Dropout(0.45)(max_pool)
+    att = Attention(self.hparams['max_sequence_length'])(output)
+    
+    output = concatenate([avg_pool, max_pool, att])
+    #output = Dropout(0.5)(conc)
+    #output = BatchNormalization()(output)
+    #output = Dense(32, activation='relu')(output)
+    #output = Dropout(0.5)(output)
+    #output = BatchNormalization()(output)
     #output = Bidirectional(CuDNNGRU(recurrent_units, return_sequences=False))(input_tensor)
     #output = Attention(self.hparams['max_sequence_length'])(output)
     #output = Dense(128, activation='relu')(output)
@@ -1177,6 +1410,7 @@ class ToxModel():
     #output = Dense(6, activation='sigmoid')(output)
     
     return output
+
    
   def get_gru_lstm(self, input_tensor, l2_weight_decay, recurrent_units=64, lstm_dim=50):
     output = Bidirectional(CuDNNGRU(recurrent_units, return_sequences=True))(input_tensor)
@@ -1258,13 +1492,17 @@ class ToxModel():
         y_pred = model.predict(val_x, batch_size=self.hparams['batch_size'])
 
         total_loss = 0
+        total_auc = 0
         for j in range(6):
             loss = log_loss(val_y[:, j], y_pred[:, j])
+            auc = compute_auc(val_y[:, j], y_pred[:, j])
+            total_auc += auc
             total_loss += loss
 
         total_loss /= 6.
+        total_auc /= 6.
 
-        print("Epoch {0} auc {1} best_auc {2}".format(current_epoch, total_loss, best_loss))
+        print("Epoch {0} logloss {1} best_logloss {2}, ROC_AUC {3}".format(current_epoch, total_loss, best_loss, total_auc))
         
 
         current_epoch += 1
@@ -1273,7 +1511,7 @@ class ToxModel():
             best_weights = model.get_weights()
             best_epoch = current_epoch
         else:
-            if current_epoch - best_epoch == 5:
+            if current_epoch - best_epoch == 15:
                 break
 
     model.set_weights(best_weights)
