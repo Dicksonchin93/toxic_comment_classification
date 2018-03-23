@@ -17,7 +17,7 @@ The dataset comprises of comments from Wikipedia’s talk page edits. It is a la
  
 ## The Approach
 
-Creating an ensemble model which predicts a probability of each type of toxicity for each comment.
+Creating an ensemble model which predicts a probability of each type of toxicity for each comment.Full explaination of my approach is documented [here](https://medium.com/@dickson_chin93/my-solution-to-achieve-top-1-in-a-novel-data-science-nlp-competition-db8db2ee356a)
 
 
 
