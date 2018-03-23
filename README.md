@@ -1,6 +1,6 @@
 # Toxic Comment Classification
 
-This is my codes for the toxic comment classification competition hosted in Kaggle([source](https://www.kaggle.com/c/jigsaw-toxic-comment-classification-challenge)). Fully modified to another level from the base code of ([here](https://github.com/conversationai/unintended-ml-bias-analysis/tree/master/unintended_ml_bias))
+This is my codes for the toxic comment classification competition hosted in Kaggle[Kaggle](https://www.kaggle.com/c/jigsaw-toxic-comment-classification-challenge). Fully modified to another level from the base code [here](https://github.com/conversationai/unintended-ml-bias-analysis/tree/master/unintended_ml_bias)
 
 
 To download datasets please run get_data.sh
