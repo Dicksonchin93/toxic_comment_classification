@@ -25,3 +25,7 @@ Creating an ensemble model which predicts a probability of each type of toxicity
 
 run install.sh and then run 
 pip install -r requirements.txt
+
+## Tips
+
+- Make sure embeddings original preprocessing is used to ensure highest percentage of embeddings can be imported
